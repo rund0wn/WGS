@@ -12,7 +12,7 @@ A Nextflow workflow to process short-read metagenome data. The workflow includes
 ## Setup:
 - Install Nextflow
 - Install Singularity or Docker
-- Create 'data' folder in main directory and change relevant paths in the [config file](nextflow.config)
+- Create 'data' folder in main directory and change relevant paths in the [config file](nextflow.config) (lines 13 and 24)
 
 ## To run:
 nextflow run WGS.nf --in_dir directory/with/fastq/files -profile (docker OR singularity)
