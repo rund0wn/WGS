@@ -12,9 +12,10 @@ nextflow.enable.dsl=2
 
 params.in_dir = './' // Default input directory
 params.out_dir = 'results' // Default output directory
-params.skip_cutadapt = false
-params.db_path = "/data/gold.fasta"
-params.python_paths = "/data/"
+params.skip_trimming = false
+params.db_path = "/data/metaphlan_dirs"
+// params.python_paths = "/data/"
+
 /*
     ================================================================================
                                 Preprocessing and QC
@@ -23,7 +24,7 @@ params.python_paths = "/data/"
 
 
 process fastp {
-    label 'preprocess'
+    label 'def'
     tag "${pair_id}"
     publishDir "${params.out_dir}_results/trimmed_reads", mode: 'copy'
 
@@ -45,7 +46,7 @@ process fastp {
 }
 
 process FastQC {
-    label 'preprocess'
+    label 'def'
     tag "${pair_id}"
     publishDir "${params.out_dir}_results/fastQC", mode: 'copy'
 
@@ -65,325 +66,128 @@ process FastQC {
 
 /*
     ================================================================================
-                                        Merging
+                                Taxonomic Assignment
     ================================================================================
 */
 
-process VsearchMerge {
-    label 'vsearch'
+process AssignTaxa {
+    label 'def'
     tag "${pair_id}"
-    publishDir "${params.out_dir}_results/intermediate_files", mode: 'copy'
+    publishDir "${params.out_dir}_results/taxa", mode: 'copy'
 
     input:
     tuple val(pair_id), path(trimmed_reads)
 
     output:
-    tuple val(pair_id), path("*.merged.fastq"), emit: merged_fastq
+    path "profiled_metagenome.txt", emit: assigned_taxa
+    path "metagenome.bowtie2.bz2", emit: bowtie_taxa
 
     script:
     def (read1, read2) = trimmed_reads
     """
-    vsearch --fastq_mergepairs ${read1} --reverse ${read2} --fastqout ${pair_id}.merged.fastq
+    metaphlan ${read1},${read2} --bowtie2out metagenome.bowtie2.bz2 --bowtie2db ${params.db_path} --nproc 5 --input_type fastq > profiled_metagenome.txt
     """
 }
 
-process VsearchMergeLog {
-    label 'vsearch'
+// // /*
+// //     ================================================================================
+// //                                      Assembly
+// //     ================================================================================
+// // */
+
+process Assemble{
+    label 'def'
     tag "${pair_id}"
-    publishDir "${params.out_dir}_results/intermediate_files", mode: 'copy'
+    publishDir "${params.out_dir}_results/genome", mode: 'copy'
 
     input:
     tuple val(pair_id), path(trimmed_reads)
 
     output:
-    path "vsearch_merge_log_${pair_id}.txt", emit: log
+    tuple val(pair_id), file("${pair_id}_assembly/final.contigs.fa"), emit: assembly
+    tuple val(pair_id), file("${pair_id}_assembly/checkpoints.txt")
+    tuple val(pair_id), file("${pair_id}_assembly/done")
+    tuple val(pair_id), file("${pair_id}_assembly/log")
+    tuple val(pair_id), file("${pair_id}_assembly/intermediate_contigs")
 
     script:
     def (read1, read2) = trimmed_reads
     """
-    vsearch --fastq_mergepairs ${read1} --reverse ${read2} --fastqout ${pair_id}.merged.fastq &> vsearch_merge_log_${pair_id}.txt
+    megahit -1 ${read1} -2 ${read2} -o ${pair_id}_assembly
     """
 }
 
-process VsearchStats {
-    label 'vsearch'
+process Evaluate{
+    label 'def'
     tag "${pair_id}"
-    publishDir "${params.out_dir}_results/intermediate_files", mode: 'copy'
+    publishDir "${params.out_dir}_results/genome/${pair_id}_assembly", mode: 'copy'
 
     input:
-    tuple val(pair_id), path(merged_fastq)
+    tuple val(pair_id), path(assembly)
 
     output:
-    path "${pair_id}.stats"
+    path "quast_${pair_id}"
 
     script:
     """
-    vsearch --fastq_eestats ${merged_fastq} --output ${pair_id}.stats
+    metaquast.py ${assembly} -o quast_${pair_id}
     """
 }
 
-process VsearchFilter {
-    label 'vsearch'
+process Bin{
+    label 'metabat'
     tag "${pair_id}"
-    publishDir "${params.out_dir}_results/intermediate_files", mode: 'copy'
+    publishDir "${params.out_dir}_results/genome/${pair_id}_assembly/bin", mode: 'copy'
 
     input:
-    tuple val (pair_id), path(merged_fastq)
+    tuple val(pair_id), path(assembly)
 
     output:
-    tuple val(pair_id), path("*.filtered.fasta"), emit: filtered_fasta
+    path "${pair_id}_bins/*.fa"
 
     script:
     """
-    vsearch --fastq_filter ${merged_fastq} --fastq_maxee 1.0 --fastq_minlen 10 --fastq_maxlen 500 --fastq_maxns 0 --fastaout ${pair_id}.filtered.fasta --fasta_width 0
+    gzip -f ${assembly}
+    metabat -i ${assembly}.gz -o ${pair_id}_bins/bin
     """
 }
 
-process VsearchDereplicate {
-    label 'vsearch'
+// // /*
+// //     ================================================================================
+// //                                      Annotation
+// //     ================================================================================
+// // */
+
+// process PredictProteins{
+//     label 'def'
+//     publishDir "${params.out_dir}_results/genome/annotation", mode: 'copy'
+
+//     input:
+//     path file
+
+//     output:
+//     path "${file.baseName}.faa"
+
+//     script:
+//     """
+//     prodigal -i ${file} -a ${file.baseName}.faa -p meta
+//     """
+// }
+
+process AnnotateGenome {
+    label 'def'
     tag "${pair_id}"
-    publishDir "${params.out_dir}_results/intermediate_files", mode: 'copy'
+    publishDir "${params.out_dir}_results/genome/annotation", mode: 'copy'
 
     input:
-    tuple val(pair_id), path(filtered_fasta)
+    tuple val(pair_id), path(assembly)
 
     output:
-    path "${pair_id}.derep.fasta"
+    path "${pair_id}"
 
     script:
     """
-    vsearch --derep_fulllength ${filtered_fasta} --strand plus --output ${pair_id}.derep.fasta --sizeout --relabel ${pair_id}. --fasta_width 0
-    """
-}
-
-process MergeAll{
-    publishDir "${params.out_dir}_results/merged_intermediates", mode: 'copy'
-
-    input:
-    path derep_fasta_files
-
-    output:
-    path "all.fasta"
-
-    script:
-    """
-    cat ${derep_fasta_files.join(' ')} > all.fasta
-    """
-}
-
-process VsearchDerepAll{
-    label 'vsearch'
-    publishDir "${params.out_dir}_results/merged_intermediates", mode: 'copy'
-
-    input:
-    path all_merged_fasta
-
-    output:
-    path "derep.fasta"
-
-    script:
-    """
-    vsearch --derep_fulllength ${all_merged_fasta} --sizein --sizeout --fasta_width 0 --uc all.derep.uc --output derep.fasta
-    """
-}
-
-/*
-    ================================================================================
-                                        Clustering
-    ================================================================================
-*/
-
-process VsearchCluster{
-    label 'vsearch'
-    publishDir "${params.out_dir}_results/merged_intermediates", mode: 'copy'
-
-    input:
-    path all_derep_fasta
-
-    output:
-    path "centroids.fasta"
-
-    script:
-    """
-    vsearch --cluster_size derep.fasta --id 0.98 --strand plus --sizein --sizeout --fasta_width 0 --centroids centroids.fasta
-    """
-}
-
-process SwarmCluster{
-    label 'swarm'
-    publishDir "${params.out_dir}_results/merged_intermediates", mode: 'copy'
-
-    input:
-    path all_derep_fasta
-    path centroids
-
-    output:
-    path "centroids.fasta"
-
-    script:
-    """
-    swarm ${all_derep_fasta} --differences 1 --fastidious --seeds ${centroids} --usearch-abundance --output /dev/null
-    """
-}
-
-process SingletonRemoval{
-    label 'vsearch'
-    publishDir "${params.out_dir}_results/merged_intermediates", mode: 'copy'
-
-    input:
-    path swarm_centroids
-
-    output:
-    path "sorted.fasta"
-
-    script:
-    """
-    vsearch --sortbysize ${swarm_centroids} --sizein --sizeout --fasta_width 0 --minsize 2 --output sorted.fasta
-    """
-}
-
-process DenovoChimeraRemoval{
-    label 'vsearch'
-    publishDir "${params.out_dir}_results/merged_intermediates", mode: 'copy'
-
-    input:
-    path nonsingleton_clusters
-
-    output:
-    path "denovo.nonchimeras.fasta"
-
-    script:
-    """
-    vsearch --uchime_denovo ${nonsingleton_clusters} --sizein --sizeout --fasta_width 0 --qmask none --nonchimeras denovo.nonchimeras.fasta
-    """
-}
-
-process ReferenceChimeraRemoval{
-    label 'vsearch'
-    publishDir "${params.out_dir}_results/merged_intermediates", mode: 'copy'
-
-    input:
-    path denovo_nonchimeras
-
-    output:
-    path "nonchimeras.fasta"
-
-    script:
-    """
-    vsearch --uchime_ref ${denovo_nonchimeras} --db ${params.db_path} --sizein --sizeout --fasta_width 0 --qmask none --dbmask none --nonchimeras nonchimeras.fasta
-    """
-}
-
-/*
-    ================================================================================
-                                        OTUs
-    ================================================================================
-*/
-
-process RelabelOTUs{
-    label 'vsearch'
-    publishDir "${params.out_dir}_results/OTU_tables", mode: 'copy'
-
-    input:
-    path ref_nonchimeras
-
-    output:
-    path "otus.fasta"
-
-    script:
-    """
-    vsearch --fastx_filter ${ref_nonchimeras} --sizein --sizeout --fasta_width 0 --relabel OTU_ --fastaout otus.fasta
-    """
-}
-
-process MapOTUs{
-    label 'vsearch'
-    publishDir "${params.out_dir}_results/OTU_tables", mode: 'copy'
-
-    input:
-    path all_merged_fasta
-    path relabeled_otus
-
-    output:
-    path "otutab.txt"
-
-    script:
-    """
-    vsearch --usearch_global ${all_merged_fasta} --db ${relabeled_otus} --id 0.98 \
-        --strand plus --sizein --sizeout --fasta_width 0 --qmask none --dbmask none \
-        --otutabout otutab.txt 
-    """
-}
-
-process ClassifyOTUs{
-    label 'vsearch'
-    publishDir "${params.out_dir}_results/OTU_tables", mode: 'copy'
-
-    input:
-    path relabeled_otus
-
-    output:
-    path "reads.sintax"
-
-    script:
-    """
-    vsearch -sintax ${relabeled_otus} -db ${params.rdp_path} -tabbedout reads.sintax \
-        -strand both --sintax_cutoff 0.8
-    """
-}
-
-/*
-    ================================================================================
-                                OTU Table Modification
-    ================================================================================
-*/
-
-process RelativeAbundance{
-    label 'python'
-    publishDir "${params.out_dir}_results/OTU_tables", mode: 'copy'
-
-    input:
-    path otu_table
-
-    output:
-    path "otutab_relative.txt"
-
-    script:
-    """
-    python3 ${params.python_paths}count_relative.py $otu_table > otutab_relative.txt
-    """
-}
-
-process MapOTUNames{
-    label 'python'
-    publishDir "${params.out_dir}_results/OTU_tables", mode: 'copy'
-
-    input:
-    path relative_abund
-    path sintax_classification
-
-    output:
-    path "otutab_relative_withtaxa.txt"
-
-    script:
-    """
-    python3 ${params.python_paths}otu_mapping.py $relative_abund $sintax_classification
-    """
-}
-
-process MergeTaxa{
-    label 'python'
-    publishDir "${params.out_dir}_results/OTU_tables", mode: 'copy'
-
-    input:
-    path mapped_relative_otus
-
-    output:
-    path "otutab_relative_withtaxa_merged.tsv"
-
-    script:
-    """
-    python3 ${params.python_paths}merge_abundance.py $mapped_relative_otus
+    prokka --outdir ${pair_id} --prefix ${pair_id} ${assembly}
     """
 }
 
@@ -391,39 +195,20 @@ workflow {
     read_pairs = Channel.fromFilePairs("${params.in_dir}/*_L001_R{1,2}_001.fastq.gz", size: 2)
 
     //Merge
-    if (!params.skip_cutadapt) {
-    CutAdapt(read_pairs)
-    FastQC(CutAdapt.out.trimmed_reads)
-    vsearch_merge_out = VsearchMerge(CutAdapt.out)
-    VsearchMergeLog(CutAdapt.out)
+    if (!params.skip_trimming) {
+    fastp(read_pairs)
+    FastQC(fastp.out.trimmed_reads)
     } else {
         FastQC(read_pairs)
-        vsearch_merge_out = VsearchMerge(read_pairs)
-        VsearchMergeLog(read_pairs)
+
     }
 
-    VsearchStats(vsearch_merge_out)
-    vsearch_filter_out = VsearchFilter(vsearch_merge_out)
-    derep_out = VsearchDereplicate(vsearch_filter_out)
-    derep_fasta_files = derep_out.collect()
-    all_merged_fasta = MergeAll(derep_fasta_files)
-    all_derep_fasta = VsearchDerepAll(all_merged_fasta)
-
-    //Cluster
-    centroids = VsearchCluster(all_derep_fasta)
-    swarm_centroids = SwarmCluster(all_derep_fasta, centroids)
-    nonsingleton_clusters = SingletonRemoval(swarm_centroids)
-    denovo_nonchimeras = DenovoChimeraRemoval(nonsingleton_clusters)
-    ref_nonchimeras = ReferenceChimeraRemoval(denovo_nonchimeras)
-
-    //OTUs
-    relabeled_otus = RelabelOTUs(ref_nonchimeras)
-    otu_table = MapOTUs(all_merged_fasta, relabeled_otus)
-    sintax_classification = ClassifyOTUs(relabeled_otus)
-
-    //OTU Table Modification
-    relative_abund = RelativeAbundance(otu_table)
-    mapped_relative_otus = MapOTUNames(relative_abund, sintax_classification)
-    merged_otus = MergeTaxa(mapped_relative_otus)
+    Assemble(fastp.out.trimmed_reads)
+    Evaluate(Assemble.out.assembly)
+    // bins = Bin(Assemble.out.assembly).flatten()
+    // AnnotateGenome(bins)
+    AnnotateGenome(Assemble.out.assembly)
+    AssignTaxa(fastp.out.trimmed_reads)
+}
 
 }
