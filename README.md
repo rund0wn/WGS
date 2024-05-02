@@ -24,3 +24,6 @@ nextflow run WGS.nf --in_dir directory/with/fastq/files -profile (docker OR sing
 
 ##### Workflow can be tested with:
 nextflow run WGS.nf --in_dir test_reads -profile (docker OR singularity)
+
+##### SLURM submission:
+sbatch [example_sbatch_script.sh](example_sbatch_script.sh)
